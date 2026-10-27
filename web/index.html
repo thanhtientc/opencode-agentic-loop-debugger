@@ -109,6 +109,7 @@
   var paused = false;
   var mode = "off";
   var visualPaused = false;
+  var flushingVisualQueue = false;
   var queuedMessages = [];
 
   mermaid.render("g1", DIAGRAM).then(function (r) {
@@ -316,7 +317,9 @@
     setDebuggerState(mode === "continue" ? "running" : "step",
       mode === "continue" ? "CONTINUING" : "STEP MODE · next hook");
     var pending = queuedMessages.splice(0);
-    pending.forEach(handleLiveMessage);
+    flushingVisualQueue = true;
+    try { pending.forEach(handleLiveMessage); }
+    finally { flushingVisualQueue = false; }
   }
   document.getElementById("next").addEventListener("click", function () {
     if (visualPaused) releaseVisualPause();
@@ -381,7 +384,7 @@
       // There is no awaited V2 hook after a final assistant text event. The
       // session is already complete, so hold the debugger timeline here and
       // queue later WAIT/idle signals until the user presses Next.
-      if (m.node === "RESPONSE" && mode === "step") {
+      if (m.node === "RESPONSE" && mode === "step" && !flushingVisualQueue) {
         visualPaused = true;
         setDebuggerState("paused", "PAUSED · RESPONSE (visual breakpoint)");
         return;
