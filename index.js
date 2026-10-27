@@ -183,7 +183,7 @@ function observeEvent(type, data) {
       state.stepUsedTool = true;
       const batch = toolBatch(sessionID, data.assistantMessageID);
       const id = String(data.id || `tool-${batch.calls.size + 1}`);
-      if (!batch.calls.has(id)) batch.calls.set(id, { name: String(data.name || "tool"), status: "pending" });
+      if (!batch.calls.has(id)) batch.calls.set(id, { name: String(data.name || "tool"), status: "pending", skill: /skill/i.test(String(data.name || "")) });
       return;
     }
     case "session.skill.activated": {
@@ -530,13 +530,8 @@ export default Plugin.define({
       const batch = toolBatches.get(e?.sessionID);
       if (batch?.calls.size) {
         const names = [...batch.calls.values()].map((call) => call.name).join(", ");
-        await breakpoint(
-          "tool.execute.after",
-          "CHECK",
-          `Result · ${batch.calls.size} tool call(s): ${names}`,
-          e?.sessionID,
-          true,
-        );
+        if (!batch.skillOnly)
+          await breakpoint("tool.execute.after", "CHECK", `Result · ${batch.calls.size} tool call(s): ${names}`, e?.sessionID, true);
         toolBatches.delete(e?.sessionID);
       }
       const initial = state.firstContext;
@@ -587,10 +582,12 @@ export default Plugin.define({
       const callID = String(e?.id || `tool-${batch.calls.size + 1}`);
       if (!batch.calls.has(callID)) batch.calls.set(callID, { name: String(e?.tool || "unknown"), status: "pending" });
       const call = batch.calls.get(callID);
+      call.skill = skillTool(e?.tool, e?.input);
       if (!batch.beforePromise) {
         batch.beforePromise = (async () => {
           const names = [...batch.calls.values()].map((item) => item.name);
-          const skillOnly = names.length === 1 && skillTool(names[0], e?.input);
+          const skillOnly = batch.calls.size === 1 && call.skill;
+          batch.skillOnly = skillOnly;
           const node = skillOnly ? "SKILL" : "TOOL";
           const label = names.length > 1
             ? `Choose tools · ${names.join(", ")}`
@@ -599,14 +596,15 @@ export default Plugin.define({
               : `Choose tool · ${names[0]}`;
           await breakpoint("tool.execute.before", node, label, e?.sessionID, true);
           const finalNames = [...batch.calls.values()].map((item) => item.name).join(", ");
-          setCurrentNode(e?.sessionID, "ACTION", `Use tool · ${batch.calls.size} call(s) executing`, "tool.execution", "hook", false, finalNames);
+          if (!batch.skillOnly)
+            setCurrentNode(e?.sessionID, "ACTION", `Use tool · ${batch.calls.size} call(s) executing`, "tool.execution", "hook", false, finalNames);
         })();
       }
       // All before hooks for parallel calls in this assistant message share
       // one TOOL gate and resume together into the ACTION stage.
       await batch.beforePromise;
       if (call) call.status = "running";
-      broadcast({ kind: "signal", type: "tool.execution", node: "ACTION", label: `Tool started · ${e?.tool || "unknown"}`, ts: Date.now(), source: "hook", sessionID: e?.sessionID, toolName: String(e?.tool || "unknown") });
+      broadcast({ kind: "signal", type: "tool.execution", node: batch.skillOnly ? "SKILL" : "ACTION", label: `${batch.skillOnly ? "Skill loaded" : "Tool started"} · ${e?.tool || "unknown"}`, ts: Date.now(), source: "hook", sessionID: e?.sessionID, toolName: String(e?.tool || "unknown") });
     });
     await ctx.tool.hook("execute.after", async (e) => {
       const batch = toolBatch(e?.sessionID, e?.messageID);
@@ -617,7 +615,8 @@ export default Plugin.define({
         batch.calls.set(callID, call);
       }
       call.status = e?.status === "error" ? "error" : "complete";
-      broadcast({ kind: "signal", type: "tool.execute.after", node: "ACTION", label: `Tool ${call.status} · ${e?.tool || "unknown"}`, ts: Date.now(), source: "hook", sessionID: e?.sessionID, toolName: String(e?.tool || "unknown") });
+      call.skill = skillTool(e?.tool, e?.input);
+      broadcast({ kind: "signal", type: "tool.execute.after", node: batch.skillOnly ? "SKILL" : "ACTION", label: `${batch.skillOnly ? "Skill" : "Tool"} ${call.status} · ${e?.tool || "unknown"}`, ts: Date.now(), source: "hook", sessionID: e?.sessionID, toolName: String(e?.tool || "unknown") });
     });
     await ctx.permission.hook("evaluate", async (e) => {
       if (e?.effect === "ask")

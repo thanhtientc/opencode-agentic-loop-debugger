@@ -44,17 +44,20 @@ The app binds to `127.0.0.1:45999` by default. Override the port with
 | **Build initial context** | First `session.hook("context")` per turn |
 | **Start task** | Initial `context` hook · synthetic checkpoint |
 | **Load Agent Skill** (prompt-provided) | `prompt` hook · `prompt.skills` · synthetic checkpoint |
-| **Load Agent Skill** (agent-activated) | `session.skill.activated`; next `context` hook; skill `tool.execute.before` |
+| **Load Agent Skill** (agent-activated) | `session.skill.activated`; skill `tool.execute.before`; next `context` hook |
 | **LLM Core** | Primary `http.request` / `http.response`; continuation `context` |
 | **Choose tool** | `session.tool.input.started`; grouped `tool.execute.before` hooks |
 | **Use tool** | `tool.execution` · synthetic batch signal; `session.tool.progress` |
-| **Result** | Per-tool `tool.execute.after`; aggregate checkpoint at next `context` hook |
+| **Result** | Non-skill batch `tool.execute.after`; aggregate checkpoint at next `context` hook |
 | **Return response** | `session.text.ended` (no tool in step; visual breakpoint) |
 | **Human review** | `permission.hook("evaluate")` (`effect: "ask"`) |
 
 Parallel tool calls from one assistant message are grouped into a single
 **Choose tool → Use tool → Result** debugger cycle; each tool's name and result
 remain in the signal log.
+
+Skill-only tool batches highlight **Load Agent Skill** and continue to **LLM
+Core**, skipping the generic **Use tool → Result** path.
 
 ## Events generally not represented
 
