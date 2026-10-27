@@ -1,0 +1,17 @@
+{
+  "name": "opencode-agentic-loop-debugger",
+  "version": "0.1.0",
+  "description": "A local web debugger for the OpenCode agentic loop",
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "agentic-loop-lifecycle.mmd",
+    "README.md"
+  ],
+  "dependencies": {
+    "@opencode/plugin": "2.1.4"
+  }
+}

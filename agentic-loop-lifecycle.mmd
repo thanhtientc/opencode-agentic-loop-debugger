@@ -1,0 +1,48 @@
+%%{init: {"flowchart": {"nodeSpacing": 110, "rankSpacing": 120, "curve": "basis", "padding": 20}}}%%
+flowchart TD
+    START([Session starts]) --> WAIT
+
+    subgraph OUTER[OUTER LOOP]
+        WAIT[Wait for prompt]
+        WAIT --> INPUT[Handle input<br/><small>Prompt hooks</small>]
+        INPUT --> CONTEXT[Build initial context<br/><small>System prompt · AGENTS.md · Session messages</small>]
+
+        subgraph INNER[INNER LOOP]
+            CONTEXT --> TASK[Start task<br/><small>Goal · Spec · Acceptance criteria</small>]
+            TASK -->|Prompt skill attached| PROMPT_SKILL[Load Agent Skill<br/><small>Prompt-provided · prompt.skills</small>]
+            PROMPT_SKILL -->|HTTP request:<br/>messages + tools| LLM{LLM Core<br/><small>Decide next output</small>}
+            TASK -->|No prompt skill<br/>HTTP request: messages + tools| LLM
+
+            LLM -->|HTTP response:<br/>read SKILL.md| SKILL[Load Agent Skill<br/><small>Add instructions to context</small>]
+            SKILL -->|Next HTTP request| LLM
+
+            LLM -->|HTTP response:<br/>tool call| TOOL[Choose tool<br/><small>Built-in · Extension · MCP</small>]
+            TOOL --> ACTION[Use tool<br/><small>Before hook → Action → After hook<br/>Read · Search · Edit · Execute</small>]
+            ACTION --> CHECK[Result]
+            CHECK -->|Next HTTP request:<br/>tool result included| LLM
+        end
+
+        LLM -->|HTTP response:<br/>final answer| RESPONSE[Return response]
+        RESPONSE --> REVIEW{Human review<br/><small>Code ownership</small>}
+        REVIEW -->|Refine| INPUT
+        REVIEW -->|Accept| WAIT
+    end
+
+    classDef start fill:#ffffff,stroke:#94a3b8,color:#1f2937,stroke-width:2px
+    classDef main fill:#dbeafe,stroke:#2563eb,color:#172554,stroke-width:2px
+    classDef llm fill:#7c3aed,stroke:#5b21b6,color:#ffffff,stroke-width:3px
+    classDef context fill:#fef9c3,stroke:#ca8a04,color:#422006,stroke-width:2px
+    classDef action fill:#dcfce7,stroke:#15803d,color:#14532d,stroke-width:2px
+    classDef human fill:#ffedd5,stroke:#ea580c,color:#431407,stroke-width:2px
+
+    class START start
+    class WAIT,INPUT,TASK,RESPONSE main
+    class CONTEXT,SKILL,PROMPT_SKILL context
+    class TOOL,ACTION,CHECK action
+    class LLM llm
+    class REVIEW human
+
+    style OUTER fill:#eff6ff,stroke:#94a3b8,stroke-width:1px
+    style INNER fill:#e2e8f0,stroke:#94a3b8,stroke-width:1px
+    linkStyle default stroke:#111111,stroke-width:2px
+    linkStyle 0 stroke:#c026d3,stroke-width:2.5px
