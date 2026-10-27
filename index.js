@@ -73,6 +73,7 @@ let pauseSequence = 0;
 // Per-session loop state. Signals are reduced into a coherent flow instead of
 // letting whichever event arrived last arbitrarily choose the highlighted node.
 const loopStates = new Map();
+const toolBatches = new Map();
 let focusedSessionID;
 
 // Debug: capture raw event stream truth to /tmp (only when AGENTIC_LOOP_DEBUG=1).
@@ -105,11 +106,28 @@ function stateFor(sessionID) {
   return loopStates.get(id);
 }
 
-function toolNode(tool) {
-  const name = String(tool || "");
-  return /skill/i.test(name)
-    ? { node: "SKILL", label: "Load Agent Skill · " + name }
-    : { node: "TOOL", label: "Choose tool · " + (name || "?") };
+function skillTool(tool, input) {
+  let serialized = "";
+  try { serialized = JSON.stringify(input); } catch { /* ignore */ }
+  return /skill/i.test(String(tool || "")) || /SKILL\.md/i.test(serialized);
+}
+
+function toolBatch(sessionID, messageID) {
+  const sid = sessionID || "__unknown__";
+  let batch = toolBatches.get(sid);
+  if (batch && messageID && batch.messageID && batch.messageID !== messageID) {
+    batch = undefined;
+  }
+  if (!batch) {
+    batch = {
+      messageID,
+      calls: new Map(),
+      beforePromise: undefined,
+    };
+    toolBatches.set(sid, batch);
+  }
+  if (messageID) batch.messageID = messageID;
+  return batch;
 }
 
 function broadcast(payload) {
@@ -147,6 +165,7 @@ function observeEvent(type, data) {
   switch (type) {
     case "session.idle":
       setCurrentNode(sessionID, "WAIT", "Wait for prompt · idle", type, "event");
+      toolBatches.delete(sessionID);
       return;
     case "session.status": {
       const status = String(
@@ -154,13 +173,17 @@ function observeEvent(type, data) {
       ).toLowerCase();
       if (status === "idle") {
         setCurrentNode(sessionID, "WAIT", "Wait for prompt · idle", type, "event");
+        toolBatches.delete(sessionID);
       }
       return;
     }
     case "session.tool.input.started": {
       // Remember that this model step selected a tool, but do not move the
-      // highlight yet. The awaited execute.before hook is the real breakpoint.
+      // highlight yet. The awaited execute.before hook is the batch breakpoint.
       state.stepUsedTool = true;
+      const batch = toolBatch(sessionID, data.assistantMessageID);
+      const id = String(data.id || `tool-${batch.calls.size + 1}`);
+      if (!batch.calls.has(id)) batch.calls.set(id, { name: String(data.name || "tool"), status: "pending" });
       return;
     }
     case "session.skill.activated": {
@@ -191,9 +214,7 @@ function observeEvent(type, data) {
       }
       return;
     case "session.step.streamed":
-      if (state.stepUsedTool && state.currentNode === "ACTION") {
-        setCurrentNode(sessionID, "CHECK", "Result · step streamed", type, "event");
-      } else if (!state.stepUsedTool && state.currentNode === "RESPONSE") {
+      if (!state.stepUsedTool && state.currentNode === "RESPONSE") {
         // The final text part has ended and its assistant step is complete.
         // Do not wait for a separate idle-status event to settle on WAIT.
         setCurrentNode(sessionID, "WAIT", "Wait for prompt · response complete", type, "event");
@@ -228,15 +249,14 @@ async function disableDebugger() {
 // This is the actual debugger stop: awaited from an OpenCode hook, so that
 // operation cannot proceed until Next/Continue (or debugger off) releases it.
 async function breakpoint(type, node, label, sessionID, force = false) {
-  const previousNode = stateFor(sessionID).currentNode;
-  setCurrentNode(sessionID, node, label, type, "hook", type === "prompt");
-  if (debuggerMode !== "step") return;
+  if (debuggerMode !== "step") {
+    setCurrentNode(sessionID, node, label, type, "hook", type === "prompt");
+    return;
+  }
   // Several hooks/events can describe the same diagram node (e.g. context,
   // request, and response all belong to LLM). Step once per node transition,
   // not once per low-level signal; a later return to that node after CHECK is
   // still a new transition because the current node has changed in between.
-  if (previousNode === node && !force) return;
-
   // Serialize breakpoints across sessions: one visible stop at a time.
   const previous = pauseTail;
   let finishTurn;
@@ -245,6 +265,14 @@ async function breakpoint(type, node, label, sessionID, force = false) {
   await previous;
 
   if (debuggerMode !== "step") {
+    setCurrentNode(sessionID, node, label, type, "hook", type === "prompt");
+    finishTurn();
+    return;
+  }
+
+  const previousNode = stateFor(sessionID).currentNode;
+  setCurrentNode(sessionID, node, label, type, "hook", type === "prompt");
+  if (previousNode === node && !force) {
     finishTurn();
     return;
   }
@@ -485,6 +513,7 @@ export default Plugin.define({
       state.pendingSkill = undefined;
       state.expectSkillActivation = false;
       state.skillsHandled = new Set();
+      toolBatches.delete(e?.sessionID);
       await breakpoint("prompt", "INPUT", "Handle input · prompt hook", e?.sessionID);
       const skills = Array.isArray(e?.prompt?.skills) ? e.prompt.skills : [];
       state.promptSkills = [];
@@ -498,6 +527,18 @@ export default Plugin.define({
     });
     await ctx.session.hook("context", async (e) => {
       const state = stateFor(e?.sessionID);
+      const batch = toolBatches.get(e?.sessionID);
+      if (batch?.calls.size) {
+        const names = [...batch.calls.values()].map((call) => call.name).join(", ");
+        await breakpoint(
+          "tool.execute.after",
+          "CHECK",
+          `Result · ${batch.calls.size} tool call(s): ${names}`,
+          e?.sessionID,
+          true,
+        );
+        toolBatches.delete(e?.sessionID);
+      }
       const initial = state.firstContext;
       const skill = state.pendingSkill;
       const promptSkills = state.promptSkills;
@@ -541,14 +582,42 @@ export default Plugin.define({
     await ctx.tool.hook("execute.before", async (e) => {
       const state = stateFor(e?.sessionID);
       state.stepUsedTool = true;
-      state.expectSkillActivation = /skill/i.test(String(e?.tool || ""));
-      const mapped = toolNode(e?.tool);
-      await breakpoint("tool.execute.before", mapped.node, mapped.label, e?.sessionID);
-      // The breakpoint has resumed; the tool is about to execute.
-      setCurrentNode(e?.sessionID, "ACTION", "Use tool · executing", "tool.execution", "hook", false, String(e?.tool || "unknown"));
+      if (skillTool(e?.tool, e?.input)) state.expectSkillActivation = true;
+      const batch = toolBatch(e?.sessionID, e?.messageID);
+      const callID = String(e?.id || `tool-${batch.calls.size + 1}`);
+      if (!batch.calls.has(callID)) batch.calls.set(callID, { name: String(e?.tool || "unknown"), status: "pending" });
+      const call = batch.calls.get(callID);
+      if (!batch.beforePromise) {
+        batch.beforePromise = (async () => {
+          const names = [...batch.calls.values()].map((item) => item.name);
+          const skillOnly = names.length === 1 && skillTool(names[0], e?.input);
+          const node = skillOnly ? "SKILL" : "TOOL";
+          const label = names.length > 1
+            ? `Choose tools · ${names.join(", ")}`
+            : skillOnly
+              ? `Load Agent Skill · ${names[0]}`
+              : `Choose tool · ${names[0]}`;
+          await breakpoint("tool.execute.before", node, label, e?.sessionID, true);
+          const finalNames = [...batch.calls.values()].map((item) => item.name).join(", ");
+          setCurrentNode(e?.sessionID, "ACTION", `Use tool · ${batch.calls.size} call(s) executing`, "tool.execution", "hook", false, finalNames);
+        })();
+      }
+      // All before hooks for parallel calls in this assistant message share
+      // one TOOL gate and resume together into the ACTION stage.
+      await batch.beforePromise;
+      if (call) call.status = "running";
+      broadcast({ kind: "signal", type: "tool.execution", node: "ACTION", label: `Tool started · ${e?.tool || "unknown"}`, ts: Date.now(), source: "hook", sessionID: e?.sessionID, toolName: String(e?.tool || "unknown") });
     });
     await ctx.tool.hook("execute.after", async (e) => {
-      await breakpoint("tool.execute.after", "CHECK", "Result · tool.execute.after", e?.sessionID);
+      const batch = toolBatch(e?.sessionID, e?.messageID);
+      const callID = String(e?.id || `tool-${batch.calls.size + 1}`);
+      let call = batch.calls.get(callID);
+      if (!call) {
+        call = { name: String(e?.tool || "unknown"), status: "pending" };
+        batch.calls.set(callID, call);
+      }
+      call.status = e?.status === "error" ? "error" : "complete";
+      broadcast({ kind: "signal", type: "tool.execute.after", node: "ACTION", label: `Tool ${call.status} · ${e?.tool || "unknown"}`, ts: Date.now(), source: "hook", sessionID: e?.sessionID, toolName: String(e?.tool || "unknown") });
     });
     await ctx.permission.hook("evaluate", async (e) => {
       if (e?.effect === "ask")
