@@ -61,7 +61,7 @@ let serverClosing = Promise.resolve();
 let heartbeatTimer = null;
 let webAppEnabled = false;
 let diagram = DEFAULT_DIAGRAM;
-let pageTemplate = "";
+let pageTemplatePath = "";
 let mermaidBundle = "";
 const sseClients = new Set();
 let openedBrowser = false;
@@ -310,7 +310,8 @@ function openBrowser(url) {
   execFile("open", [url], () => {});
 }
 
-function buildPage(diagramText) {
+async function buildPage(diagramText) {
+  const pageTemplate = await fs.readFile(pageTemplatePath, "utf8");
   const mermaidSrc =
     process.env.AGENTIC_LOOP_MERMAID ||
     "/vendor/mermaid-11.17.2.min.js";
@@ -407,8 +408,14 @@ async function startServerOnce() {
         res.end(JSON.stringify(DEBUG, null, 2));
         return;
       }
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(buildPage(diagram));
+      buildPage(diagram).then((html) => {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(html);
+      }).catch((error) => {
+        console.error("[agentic-loop] could not read web UI:", error?.message || error);
+        res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("Could not load debugger web UI");
+      });
     });
     server = instance;
     let settled = false;
@@ -460,7 +467,7 @@ export default Plugin.define({
   async setup(ctx) {
     const dir = ctx?.location?.directory || process.cwd();
     diagram = await loadDiagram(dir);
-    pageTemplate = await fs.readFile(path.join(PACKAGE_DIR, "web", "index.html"), "utf8");
+    pageTemplatePath = path.join(PACKAGE_DIR, "web", "index.html");
     mermaidBundle = await fs.readFile(path.join(PACKAGE_DIR, "web", "vendor", "mermaid-11.17.2.min.js"), "utf8");
     const url = `http://127.0.0.1:${PORT}`;
 
