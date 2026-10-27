@@ -317,8 +317,14 @@
     setDebuggerState(mode === "continue" ? "running" : "step",
       mode === "continue" ? "CONTINUING" : "STEP MODE · next hook");
     var pending = queuedMessages.splice(0);
+    var hasQueuedWait = pending.some(function (m) { return m.kind === "signal" && m.node === "WAIT"; });
     flushingVisualQueue = true;
-    try { pending.forEach(handleLiveMessage); }
+    try {
+      pending.forEach(function (m) {
+        if (hasQueuedWait && m.kind === "signal" && m.node === "RESPONSE") return;
+        handleLiveMessage(m);
+      });
+    }
     finally { flushingVisualQueue = false; }
   }
   document.getElementById("next").addEventListener("click", function () {
@@ -379,7 +385,8 @@
       }
       // Passive event-stream signals update the log/highlight only when not
       // stopped at a real awaited hook breakpoint.
-      if (m.node && !paused) pulse(m.node, m.label);
+      var isWaitSignal = m.kind === "signal" && m.node === "WAIT";
+      if (m.node && (!paused || isWaitSignal)) pulse(m.node, m.label);
       if (m.node) log(m.ts, m.type, m.node, !!HOOKS[m.type], m.toolName);
       // There is no awaited V2 hook after a final assistant text event. The
       // session is already complete, so hold the debugger timeline here and
@@ -389,7 +396,7 @@
         setDebuggerState("paused", "PAUSED · RESPONSE (visual breakpoint)");
         return;
       }
-      if (m.node === "WAIT" && mode !== "off")
+      if (isWaitSignal && mode !== "off")
         setDebuggerState("idle", "WAITING FOR PROMPT");
   }
   connect();
